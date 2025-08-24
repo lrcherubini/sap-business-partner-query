@@ -1,3 +1,6 @@
+business_partners/*
+config.json
+
 # Logs
 logs
 *.log
