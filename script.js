@@ -1,25 +1,36 @@
 // Importa as bibliotecas necessárias.
-// 'axios' para fazer requisições HTTP e 'fs' para interagir com o sistema de arquivos.
-const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
-const https = require('https');
+const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
+const https = require("https");
 
 /*
-* Config.json template
 {
-    "host": "",
+    "host": "https://sap.company.com.br:8100",
     "auth": {
         "user": "",
         "pass": ""
     },
     "params": {
-        "sap-client": "",
+        "sap-client": "500",
         "sap-language": "PT",
-        "$filter": "",
-        "$select": "",
-        "$expand": ""
+        "$filter": "IsMarkedForArchiving eq false and BusinessPartnerIsBlocked eq false",
+        "$select": "BusinessPartner,Customer,Supplier,LastChangeDate,LastChangeTime,LastChangedByUser,BusinessPartnerFullName,IsNaturalPerson,BusinessPartnerIsBlocked,to_Supplier/SupplierProcurementBlock,to_Supplier/to_SupplierPurchasingOrg/PurchasingIsBlockedForSupplier,to_Customer/OrderIsBlockedForCustomer,to_Customer/PostingIsBlocked,BusinessPartnerIsBlocked,to_BusinessPartnerRole/BusinessPartnerRole,to_BusinessPartnerTax/BPTaxType,to_BusinessPartnerTax/BPTaxNumber,to_BusinessPartnerAddress/to_EmailAddress/EmailAddress,OrganizationFoundationDate,to_BusinessPartnerAddress/AddressID,to_BusinessPartnerAddress/StreetName,to_BusinessPartnerAddress/HouseNumber,to_BusinessPartnerAddress/Region,to_BusinessPartnerAddress/HouseNumberSupplementText,to_BusinessPartnerAddress/PostalCode,to_BusinessPartnerAddress/CityCode,to_BusinessPartnerAddress/CityName,to_BusinessPartnerAddress/Country,to_BusinessPartnerAddress/to_FaxNumber/FaxNumber,to_BusinessPartnerAddress/to_PhoneNumber/PhoneNumber,to_BusinessPartnerBank/BankNumber,to_BusinessPartnerBank/BankIdentification,to_BusinessPartnerBank/BankAccount",
+        "$expand": "to_Supplier,to_Customer,to_Supplier/to_SupplierPurchasingOrg,to_BusinessPartnerRole,to_BusinessPartnerTax,to_BusinessPartnerAddress,to_BusinessPartnerAddress/to_PhoneNumber,to_BusinessPartnerAddress/to_EmailAddress,to_BusinessPartnerAddress/to_FaxNumber,to_BusinessPartnerBank"
     },
+    "anonymizeFields": [
+        "BusinessPartnerFullName",
+        "LastChangedByUser",
+        "to_BusinessPartnerTax/BPTaxNumber",
+        "to_BusinessPartnerAddress/StreetName",
+        "to_BusinessPartnerAddress/HouseNumber",
+        "to_BusinessPartnerAddress/PostalCode",
+        "to_BusinessPartnerAddress/to_EmailAddress/EmailAddress",
+        "to_BusinessPartnerAddress/to_FaxNumber/FaxNumber",
+        "to_BusinessPartnerAddress/to_PhoneNumber/PhoneNumber",
+        "to_BusinessPartnerBank/BankNumber",
+        "to_BusinessPartnerBank/BankAccount"
+    ],
     "pageSize": 50,
     "outputDir": "business_partners"
 }
@@ -31,147 +42,217 @@ const https = require('https');
  * @returns {object} O objeto de configuração.
  */
 function loadConfig(filePath) {
-    try {
-        const configFile = fs.readFileSync(filePath, 'utf8');
-        return JSON.parse(configFile);
-    } catch (error) {
-        console.error(`Erro ao ler ou analisar o arquivo de configuração: ${filePath}`);
-        console.error(error.message);
-        // Encerra o processo se o arquivo de configuração não puder ser lido.
-        process.exit(1); 
+  try {
+    const configFile = fs.readFileSync(filePath, "utf8");
+    return JSON.parse(configFile);
+  } catch (error) {
+    console.error(
+      `Erro ao ler ou analisar o arquivo de configuração: ${filePath}`
+    );
+    console.error(error.message);
+    process.exit(1);
+  }
+}
+
+/**
+ * Anonimiza um valor baseado no seu tipo.
+ * @param {any} value - O valor original a ser anonimizado.
+ * @param {string} fieldName - O nome do campo, para lógicas específicas (ex: email).
+ * @returns {any} O valor anonimizado.
+ */
+function anonymizeValue(value, fieldName) {
+  if (value === null || typeof value === "undefined") {
+    return value;
+  }
+
+  const fieldLower = fieldName.toLowerCase();
+
+  // Lógica para emails
+  if (
+    typeof value === "string" &&
+    (fieldLower.includes("email") || value.includes("@"))
+  ) {
+    const randomId = Math.random().toString(36).substring(2, 8);
+    return `anon_${randomId}@anonimizado.com`;
+  }
+
+  // Lógica para outros tipos de dados
+  switch (typeof value) {
+    case "string":
+      // Verifica se é uma data no formato OData /Date(...)/
+      if (value.startsWith("/Date(")) {
+        return value; // Mantém datas para não quebrar cenários de teste
+      }
+      return `ANONIMIZADO_${Math.random().toString(36).substring(2, 10)}`;
+    case "number":
+      return Math.floor(Math.random() * 900000) + 100000;
+    case "boolean":
+      return value; // Geralmente não é necessário anonimizar booleanos
+    default:
+      return `ANONIMIZADO`;
+  }
+}
+
+/**
+ * Navega recursivamente em um objeto e anonimiza os campos especificados.
+ * @param {object} obj - O objeto a ser percorrido.
+ * @param {string[]} fieldsToAnonymize - Um array de caminhos de campos a serem anonimizados.
+ */
+function anonymizeObject(obj, fieldsToAnonymize) {
+  if (
+    !obj ||
+    typeof obj !== "object" ||
+    !fieldsToAnonymize ||
+    fieldsToAnonymize.length === 0
+  ) {
+    return;
+  }
+
+  for (const fieldPath of fieldsToAnonymize) {
+    const pathParts = fieldPath.split("/");
+    let currentLevel = obj;
+
+    for (let i = 0; i < pathParts.length; i++) {
+      const part = pathParts[i];
+
+      if (currentLevel === null || typeof currentLevel[part] === "undefined") {
+        break; // Caminho não encontrado no objeto, passa para o próximo
+      }
+
+      // Se for a última parte do caminho, anonimiza o valor
+      if (i === pathParts.length - 1) {
+        currentLevel[part] = anonymizeValue(currentLevel[part], part);
+      } else {
+        // Navega para o próximo nível
+        currentLevel = currentLevel[part];
+        // Se o próximo nível for um objeto com 'results' (array OData), itera sobre ele
+        if (
+          currentLevel &&
+          currentLevel.results &&
+          Array.isArray(currentLevel.results)
+        ) {
+          const remainingPath = pathParts.slice(i + 1).join("/");
+          for (const item of currentLevel.results) {
+            anonymizeObject(item, [remainingPath]);
+          }
+          // Interrompe a iteração do caminho atual, pois já foi processado recursivamente
+          break;
+        }
+      }
     }
+  }
 }
 
 /**
  * Função principal para buscar e salvar os Business Partners.
- * A função é assíncrona para lidar com as requisições de rede.
  * @param {object} config - O objeto de configuração carregado.
  */
 async function fetchAllBusinessPartners(config) {
-    console.log('Iniciando a busca de Business Partners...');
+  console.log("Iniciando a busca de Business Partners...");
 
-    // Cria o diretório de saída se ele não existir
-    if (!fs.existsSync(config.outputDir)) {
-        fs.mkdirSync(config.outputDir, { recursive: true });
-        console.log(`Diretório '${config.outputDir}' criado com sucesso.`);
-    }
+  if (!fs.existsSync(config.outputDir)) {
+    fs.mkdirSync(config.outputDir, { recursive: true });
+    console.log(`Diretório '${config.outputDir}' criado com sucesso.`);
+  }
 
-    let skip = 0; // Contador para a paginação ($skip)
-    let totalCount = 0; // Armazena o número total de registros
-    let hasMoreData = true; // Flag para controlar o loop de paginação
+  let skip = 0;
+  let totalCount = 0;
+  let hasMoreData = true;
 
-    // Agente HTTPS para ignorar erros de certificado (comum em ambientes de desenvolvimento)
-    // Em produção, configure os certificados corretamente.
-    const httpsAgent = new https.Agent({
-        rejectUnauthorized: false
-    });
+  const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
-    // Loop para buscar os dados em páginas
-    do {
-        try {
-            // Constrói a URL do serviço OData com os parâmetros de paginação e outros
-            const serviceUrl = `${config.host}/sap/opu/odata/sap/API_BUSINESS_PARTNER/A_BusinessPartner`;
-            const queryParams = new URLSearchParams({
-                '$format': 'json',
-                '$inlinecount': 'allpages',
-                '$top': config.pageSize,
-                '$skip': skip,
-                ...config.params
-            });
+  do {
+    try {
+      const serviceUrl = `${config.host}/sap/opu/odata/sap/API_BUSINESS_PARTNER/A_BusinessPartner`;
+      const queryParams = new URLSearchParams({
+        $format: "json",
+        $inlinecount: "allpages",
+        $top: config.pageSize,
+        $skip: skip,
+        ...config.params,
+      });
 
-            // Remove parâmetros vazios para não poluir a URL
-            for (const [key, value] of Object.entries(config.params)) {
-                if (!value) {
-                    queryParams.delete(key);
-                }
-            }
-            
-            const fullUrl = `${serviceUrl}?${queryParams.toString()}`;
-            console.log(`\nBuscando dados da URL: ${fullUrl}`);
+      for (const [key, value] of Object.entries(config.params)) {
+        if (!value) queryParams.delete(key);
+      }
 
-            // Realiza a requisição GET usando axios
-            const response = await axios.get(fullUrl, {
-                httpsAgent,
-                auth: {
-                    username: config.auth.user,
-                    password: config.auth.pass
-                },
-                headers: {
-                    'Accept': 'application/json'
-                }
-            });
-            
-            const data = response.data.d;
-            const results = data.results;
+      const fullUrl = `${serviceUrl}?${queryParams.toString()}`;
+      console.log(`\nBuscando dados da URL: ${fullUrl}`);
 
-            // Na primeira requisição, obtemos o número total de registros
-            if (skip === 0) {
-                totalCount = parseInt(data.__count, 10);
-                if (isNaN(totalCount)) {
-                    console.error("Erro: Não foi possível obter a contagem total de registros.");
-                    break;
-                }
-                console.log(`Total de Business Partners encontrados: ${totalCount}`);
-            }
+      const response = await axios.get(fullUrl, {
+        httpsAgent,
+        auth: { username: config.auth.user, password: config.auth.pass },
+        headers: { Accept: "application/json" },
+      });
 
-            if (results && results.length > 0) {
-                console.log(`Processando ${results.length} registros (de ${skip + 1} a ${skip + results.length})...`);
-                
-                // Itera sobre cada Business Partner retornado na página atual
-                for (const partner of results) {
-                    const bpId = partner.BusinessPartner;
-                    const filePath = path.join(config.outputDir, `${bpId}.json`);
-                    
-                    // Converte o objeto do parceiro para uma string JSON formatada
-                    const fileContent = JSON.stringify(partner, null, 4);
-                    
-                    // Salva o conteúdo no arquivo JSON
-                    fs.writeFileSync(filePath, fileContent);
-                    console.log(` -> Arquivo salvo: ${filePath}`);
-                }
+      const data = response.data.d;
+      const results = data.results;
 
-                // Atualiza o contador de skip para a próxima página
-                skip += results.length;
-
-                // Verifica se ainda há dados a serem buscados
-                if (skip >= totalCount) {
-                    hasMoreData = false;
-                }
-            } else {
-                // Se não houver mais resultados, para o loop
-                hasMoreData = false;
-            }
-
-        } catch (error) {
-            // Tratamento de erros
-            console.error('\nOcorreu um erro ao buscar os dados:');
-            if (error.response) {
-                // O servidor respondeu com um status de erro (4xx, 5xx)
-                console.error(`Status: ${error.response.status} - ${error.response.statusText}`);
-                console.error('Data:', error.response.data);
-            } else if (error.request) {
-                // A requisição foi feita, mas não houve resposta
-                console.error('Nenhuma resposta recebida do servidor:', error.request);
-            } else {
-                // Algo aconteceu ao configurar a requisição
-                console.error('Erro na configuração da requisição:', error.message);
-            }
-            hasMoreData = false; // Interrompe o processo em caso de erro
+      if (skip === 0) {
+        totalCount = parseInt(data.__count, 10);
+        if (isNaN(totalCount)) {
+          console.error(
+            "Erro: Não foi possível obter a contagem total de registros."
+          );
+          break;
         }
-    } while (hasMoreData);
+        console.log(`Total de Business Partners encontrados: ${totalCount}`);
+      }
 
-    console.log('\nProcesso finalizado.');
+      if (results && results.length > 0) {
+        console.log(
+          `Processando ${results.length} registros (de ${skip + 1} a ${
+            skip + results.length
+          })...`
+        );
+
+        for (const partner of results) {
+          // *** APLICA A ANONIMIZAÇÃO AQUI ***
+          if (config.anonymizeFields && config.anonymizeFields.length > 0) {
+            anonymizeObject(partner, config.anonymizeFields);
+          }
+
+          const bpId = partner.BusinessPartner;
+          const filePath = path.join(config.outputDir, `${bpId}.json`);
+          const fileContent = JSON.stringify(partner, null, 4);
+
+          fs.writeFileSync(filePath, fileContent);
+          console.log(` -> Arquivo salvo: ${filePath}`);
+        }
+
+        skip += results.length;
+        if (skip >= totalCount) hasMoreData = false;
+      } else {
+        hasMoreData = false;
+      }
+    } catch (error) {
+      console.error("\nOcorreu um erro ao buscar os dados:");
+      if (error.response) {
+        console.error(
+          `Status: ${error.response.status} - ${error.response.statusText}`
+        );
+        console.error("Data:", error.response.data);
+      } else if (error.request) {
+        console.error("Nenhuma resposta recebida do servidor:", error.request);
+      } else {
+        console.error("Erro na configuração da requisição:", error.message);
+      }
+      hasMoreData = false;
+    }
+  } while (hasMoreData);
+
+  console.log("\nProcesso finalizado.");
 }
 
 // --- Ponto de Entrada do Script ---
-// Verifica se o caminho do arquivo de configuração foi passado como argumento
 const configFilePath = process.argv[2];
 if (!configFilePath) {
-    console.error("Erro: Forneça o caminho para o arquivo de configuração como argumento.");
-    console.log("Uso: node script.js <caminho_para_config.json>");
-    process.exit(1); // Encerra o processo com um código de erro
+  console.error(
+    "Erro: Forneça o caminho para o arquivo de configuração como argumento."
+  );
+  console.log("Uso: node script.js <caminho_para_config.json>");
+  process.exit(1);
 }
 
-// Carrega a configuração e inicia a execução da função principal
 const config = loadConfig(configFilePath);
 fetchAllBusinessPartners(config);
