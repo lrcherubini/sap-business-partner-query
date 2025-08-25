@@ -16,7 +16,8 @@ const https = require("https");
         "sap-language": "PT",
         "$filter": "IsMarkedForArchiving eq false and BusinessPartnerIsBlocked eq false",
         "$select": "BusinessPartner,Customer,Supplier,LastChangeDate,LastChangeTime,LastChangedByUser,BusinessPartnerFullName,IsNaturalPerson,BusinessPartnerIsBlocked,to_Supplier/SupplierProcurementBlock,to_Supplier/to_SupplierPurchasingOrg/PurchasingIsBlockedForSupplier,to_Customer/OrderIsBlockedForCustomer,to_Customer/PostingIsBlocked,BusinessPartnerIsBlocked,to_BusinessPartnerRole/BusinessPartnerRole,to_BusinessPartnerTax/BPTaxType,to_BusinessPartnerTax/BPTaxNumber,to_BusinessPartnerAddress/to_EmailAddress/EmailAddress,OrganizationFoundationDate,to_BusinessPartnerAddress/AddressID,to_BusinessPartnerAddress/StreetName,to_BusinessPartnerAddress/HouseNumber,to_BusinessPartnerAddress/Region,to_BusinessPartnerAddress/HouseNumberSupplementText,to_BusinessPartnerAddress/PostalCode,to_BusinessPartnerAddress/CityCode,to_BusinessPartnerAddress/CityName,to_BusinessPartnerAddress/Country,to_BusinessPartnerAddress/to_FaxNumber/FaxNumber,to_BusinessPartnerAddress/to_PhoneNumber/PhoneNumber,to_BusinessPartnerBank/BankNumber,to_BusinessPartnerBank/BankIdentification,to_BusinessPartnerBank/BankAccount",
-        "$expand": "to_Supplier,to_Customer,to_Supplier/to_SupplierPurchasingOrg,to_BusinessPartnerRole,to_BusinessPartnerTax,to_BusinessPartnerAddress,to_BusinessPartnerAddress/to_PhoneNumber,to_BusinessPartnerAddress/to_EmailAddress,to_BusinessPartnerAddress/to_FaxNumber,to_BusinessPartnerBank"
+        "$expand": "to_Supplier,to_Customer,to_Supplier/to_SupplierPurchasingOrg,to_BusinessPartnerRole,to_BusinessPartnerTax,to_BusinessPartnerAddress,to_BusinessPartnerAddress/to_PhoneNumber,to_BusinessPartnerAddress/to_EmailAddress,to_BusinessPartnerAddress/to_FaxNumber,to_BusinessPartnerBank",
+        "$orderby": "BusinessPartner desc"
     },
     "anonymizeFields": [
         "BusinessPartnerFullName",
@@ -32,6 +33,7 @@ const https = require("https");
         "to_BusinessPartnerBank/BankAccount"
     ],
     "pageSize": 50,
+    "maxRecords": 200,
     "outputDir": "business_partners"
 }
 */
@@ -51,6 +53,35 @@ function loadConfig(filePath) {
     );
     console.error(error.message);
     process.exit(1);
+  }
+}
+
+/**
+ * Remove recursivamente a propriedade '__metadata' de um objeto ou array.
+ * @param {any} obj - O objeto ou array a ser limpo.
+ */
+function removeMetadata(obj) {
+  if (obj === null || typeof obj !== "object") {
+    return;
+  }
+
+  if (Array.isArray(obj)) {
+    // Se for um array, itera sobre seus elementos.
+    obj.forEach((item) => removeMetadata(item));
+  } else {
+    // Se for um objeto, itera sobre suas chaves.
+    for (const key in obj) {
+      if (key === "__metadata") {
+        delete obj[key];
+      } else if (typeof obj[key] === "object") {
+        // Se uma propriedade for um objeto ou array, chama a função recursivamente.
+        removeMetadata(obj[key]);
+      }
+    }
+    // Caso especial para a propriedade 'results' do OData, que é um array.
+    if (obj.results && Array.isArray(obj.results)) {
+      removeMetadata(obj.results);
+    }
   }
 }
 
@@ -157,6 +188,7 @@ async function fetchAllBusinessPartners(config) {
 
   let skip = 0;
   let totalCount = 0;
+  let effectiveTotal = Infinity; // Define um total efetivo para respeitar o maxRecords
   let hasMoreData = true;
 
   const httpsAgent = new https.Agent({ rejectUnauthorized: false });
@@ -196,18 +228,36 @@ async function fetchAllBusinessPartners(config) {
           );
           break;
         }
-        console.log(`Total de Business Partners encontrados: ${totalCount}`);
+        console.log(
+          `Total de Business Partners encontrados no servidor: ${totalCount}`
+        );
+
+        // Define o total efetivo de registros a serem buscados
+        effectiveTotal = totalCount;
+        if (
+          config.maxRecords &&
+          config.maxRecords > 0 &&
+          config.maxRecords < totalCount
+        ) {
+          effectiveTotal = config.maxRecords;
+          console.log(
+            `Limite máximo de registros a serem processados definido para: ${effectiveTotal}`
+          );
+        }
       }
 
       if (results && results.length > 0) {
         console.log(
           `Processando ${results.length} registros (de ${skip + 1} a ${
             skip + results.length
-          })...`
+          } de ${effectiveTotal})...`
         );
 
         for (const partner of results) {
-          // *** APLICA A ANONIMIZAÇÃO AQUI ***
+          // 1. REMOVE A TAG __METADATA DE TODOS OS NÍVEIS
+          removeMetadata(partner);
+
+          // 2. APLICA A ANONIMIZAÇÃO DOS CAMPOS CONFIGURADOS
           if (config.anonymizeFields && config.anonymizeFields.length > 0) {
             anonymizeObject(partner, config.anonymizeFields);
           }
@@ -221,7 +271,10 @@ async function fetchAllBusinessPartners(config) {
         }
 
         skip += results.length;
-        if (skip >= totalCount) hasMoreData = false;
+        // Verifica se deve continuar buscando dados
+        if (skip >= effectiveTotal) {
+          hasMoreData = false;
+        }
       } else {
         hasMoreData = false;
       }
@@ -241,7 +294,11 @@ async function fetchAllBusinessPartners(config) {
     }
   } while (hasMoreData);
 
-  console.log("\nProcesso finalizado.");
+  console.log(
+    `\nProcesso finalizado. Total de ${
+      skip > effectiveTotal ? effectiveTotal : skip
+    } registros foram processados.`
+  );
 }
 
 // --- Ponto de Entrada do Script ---
